@@ -109,27 +109,72 @@ app.post('/api/medical', async (req, res) => {
     res.status(400).json({ error: error.message || 'فشل حفظ البيانات' });
   }
 });
-
-// --- مسار للبحث عن سجل باستخدام idNumber و servicecode ---
+// --- مسار آمن للبحث عن سجل طبي باستخدام idNumber و servicecode ---
 app.get('/api/medical/search', async (req, res) => {
   const { idNumber, servicecode } = req.query;
 
-  // التحقق من وجود المعلَمين
+  // 1. التحقق من وجود المُعطيات
   if (!idNumber || !servicecode) {
-    return res.status(400).json({ error: 'يجب تمرير "idNumber" و "servicecode" كـ query parameters' });
+    return res.status(400).json({ error: 'الرجاء إدخال رقم الهوية ورمز الخدمة' });
+  }
+
+  // 2. التحقق من أن المُعطيات سلاسل نصية (لمنع حقن كائنات)
+  if (typeof idNumber !== 'string' || typeof servicecode !== 'string') {
+    return res.status(400).json({ error: 'بيانات الإدخال غير صالحة' });
+  }
+
+  // 3. تنقية المدخلات من أي أحرف غير مرغوب فيها (حماية إضافية)
+  const cleanIdNumber = idNumber.trim();
+  const cleanServiceCode = servicecode.trim();
+
+  // 4. التحقق من التنسيق باستخدام تعبيرات منتظمة
+  const idRegex = /^\d{10}$/; // رقم هوية/إقامة سعودي: 10 أرقام فقط
+  const serviceCodeRegex = /^[A-Za-z0-9]{6,20}$/; // أحرف وأرقام، طول 6–20
+
+  if (!idRegex.test(cleanIdNumber)) {
+    return res.status(400).json({ error: 'رقم الهوية أو الإقامة غير صحيح' });
+  }
+
+  if (!serviceCodeRegex.test(cleanServiceCode)) {
+    return res.status(400).json({ error: 'رمز الخدمة غير صحيح' });
   }
 
   try {
-    const record = await MedicalRecord.findOne({ idNumber, servicecode });
+    // 5. منع حقن NoSQL: نضمن أن القيم نصوص بسيطة (تم بالفعل أعلاه)
+    const record = await MedicalRecord.findOne(
+      {
+        idNumber: cleanIdNumber,
+        servicecode: cleanServiceCode
+      },
+      {
+        // 6. عرض الحقول المطلوبة فقط (عدم تسريب _id أو __v أو أي حقول داخلية)
+        _id: 0,
+        __v: 0,
+        // يمكنك إضافة المزيد من الحقول الحساسة هنا إذا وُجدت (مثل secret, token...)
+      }
+    ).lean(); // .lean() → يُرجع كائن عادي، وليس مستند Mongoose (أكثر أمانًا وأداءً)
 
     if (!record) {
-      return res.status(404).json({ error: 'خطأ في الاستعلام' });
+      // 7. رسالة خطأ عامة (لا تكشف عن وجود/عدم وجود سجل)
+      return res.status(404).json({ error: 'خطا في الاستعلام' });
     }
 
-    res.json(record);
+    // 8. (اختياري) التأكد من أن القيم لا تحتوي على كائنات خبيثة (رغم أن .lean() يمنع ذلك)
+    const safeResponse = {
+      name: typeof record.name === 'string' ? record.name : '',
+      issueDate: record.issueDate instanceof Date ? record.issueDate.toISOString() : record.issueDate,
+      startDate: record.startDate instanceof Date ? record.startDate.toISOString() : record.startDate,
+      endDate: record.endDate instanceof Date ? record.endDate.toISOString() : record.endDate,
+      duration: typeof record.duration === 'number' ? record.duration : 0,
+      doctor: typeof record.doctor === 'string' ? record.doctor : '',
+      jobTitle: typeof record.jobTitle === 'string' ? record.jobTitle : ''
+    };
+
+    res.json(safeResponse);
   } catch (error) {
-    console.error('خطأ في البحث:', error);
-    res.status(500).json({ error: 'فشل في جلب البيانات' });
+    console.error('خطأ أمني محتمل أو فني:', error);
+    // 9. رسالة خطأ عامة — لا تكشف عن التفاصيل الداخلية
+    res.status(500).json({ error: 'تعذر معالجة الطلب' });
   }
 });
 
